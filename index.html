@@ -173,7 +173,7 @@ body {
 }
 
 .dock-item.spinning .dock-item-icon {
-  transition: transform 0.3s ease;
+  transition: transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .dock-item.spinning.playing .dock-item-icon {
@@ -185,7 +185,7 @@ body {
 }
 
 .dock-item.spinning .dock-item-label {
-  transition: opacity 0.2s;
+  transition: opacity 0.35s ease;
 }
 
 .dock-item.spinning:hover .dock-item-label {
@@ -255,7 +255,12 @@ body {
   transition: transform 0.15s ease;
 }
 
-.dock-item:hover { transform: scale(1.12) translateY(-4px); }
+.dock-item {
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.dock-item:hover {
+  transform: scale(1.14) translateY(-6px);
+}
 
 .dock-item-icon {
   width: 64px;
@@ -300,11 +305,38 @@ body {
   100% { transform: translateX(-50%); }
 }
 
+
+/* ── BEAT ANIMATIONS ── */
+canvas#particleCanvas {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+  z-index: 50;
+  opacity: 0;
+  transition: opacity 0.8s ease;
+}
+canvas#particleCanvas.active { opacity: 1; }
+
+
+
+
+@keyframes wordmark-pulse {
+  0%   { transform: rotate(1deg) scale(1); }
+  50%  { transform: rotate(1deg) scale(1.015); }
+  100% { transform: rotate(1deg) scale(1); }
+}
+
+.wordmark-img-wrap svg {
+  transition: filter 0.05s ease;
+}
+
 </style>
 </head>
 <body>
 
 <!-- HERO -->
+<canvas id="particleCanvas"></canvas>
 <section class="hero">
   <div class="wordmark-block">
     <div class="wordmark-img-wrap">
@@ -444,7 +476,8 @@ body {
 
     function tick() {
       if (!paused) {
-        offset += speed;
+        const boost = window._carouselBeatBoost || 0;
+        offset += speed + boost * 0.3;
       }
       // Seamless loop: once we've scrolled one full set, jump back silently
       if (halfWidth > 0 && offset >= halfWidth) {
@@ -505,7 +538,7 @@ body {
   var ytFrame = document.getElementById('ytPlayer');
 
   // Playlist autoplay URL — starts playlist, autoplay=1, mute=0
-  var playURL = "https://www.youtube.com/embed/c0-hvjV2A5Y?list=RDEMgJ73zad9WLymaoE0vGv9LA&autoplay=1&loop=1&controls=0&enablejsapi=1";
+  var playURL = "https://www.youtube.com/embed/c0-hvjV2A5Y?list=RDEM6mP505XPi7kWwygTUHGIJQ&autoplay=1&loop=1&controls=0&enablejsapi=1";
 
   var btn = document.getElementById('spinningBtn');
   if (btn) {
@@ -523,6 +556,221 @@ body {
       }
     });
   }
+</script>
+
+
+<script>
+// ── BPM BEAT ENGINE (Fred again ~128 BPM) ────────────────────────────────
+(function() {
+  const BPM = 85;
+  const BEAT_INTERVAL = 60000 / BPM; // ms per beat ~468ms
+  const CREAM = '#faf7f2';
+  const INK   = '#1a1a2e';
+
+  let engineRunning = false;
+  let beatTimer = null;
+  let frameId = null;
+  let beatPhase = 0; // 0-1, resets each beat
+  let lastBeatTime = 0;
+  let bar = 0; // which beat in a 4/4 bar
+
+  // ── Particle system ───────────────────────────────────────────────────────
+  const pCanvas = document.getElementById('particleCanvas');
+  const pCtx    = pCanvas.getContext('2d');
+  const particles = [];
+
+  function resizeCanvases() {
+    pCanvas.width  = window.innerWidth;
+    pCanvas.height = window.innerHeight;
+    wCanvas.width  = window.innerWidth;
+    wCanvas.height = 80;
+  }
+
+  class Particle {
+    constructor(onBeat) {
+      this.x = Math.random() * pCanvas.width;
+      this.y = Math.random() * pCanvas.height;
+      this.size = onBeat ? (Math.random() * 4 + 2) : (Math.random() * 2 + 0.5);
+      this.speedX = (Math.random() - 0.5) * (onBeat ? 2.5 : 0.8);
+      this.speedY = (Math.random() - 0.5) * (onBeat ? 2.5 : 0.8);
+      this.life = 1;
+      this.decay = Math.random() * 0.015 + (onBeat ? 0.02 : 0.005);
+      this.color = onBeat
+        ? `hsla(${Math.random() * 40 + 200}, 60%, 70%, `  // soft blues/purples on beat
+        : `hsla(${Math.random() * 20 + 30}, 30%, 80%, `;  // warm cream off-beat
+    }
+    update() {
+      this.x += this.speedX;
+      this.y += this.speedY;
+      this.life -= this.decay;
+      this.size *= 0.995;
+    }
+    draw() {
+      pCtx.beginPath();
+      pCtx.arc(this.x, this.y, Math.max(0, this.size), 0, Math.PI * 2);
+      pCtx.fillStyle = this.color + this.life + ')';
+      pCtx.fill();
+    }
+  }
+
+  // ── Waveform bars ─────────────────────────────────────────────────────────
+  const wCanvas = document.getElementById('waveCanvas');
+  const wCtx    = wCanvas.getContext('2d');
+  const BAR_COUNT = 80;
+  let waveHeights = new Array(BAR_COUNT).fill(0);
+  let waveTargets = new Array(BAR_COUNT).fill(0);
+
+  function pulseBars(intensity) {
+    for (let i = 0; i < BAR_COUNT; i++) {
+      const center = BAR_COUNT / 2;
+      const dist = Math.abs(i - center) / center;
+      const rand = Math.random();
+      waveTargets[i] = intensity * (1 - dist * 0.5) * rand * 60 + rand * 10;
+    }
+  }
+
+  function drawWave() {
+    wCtx.clearRect(0, 0, wCanvas.width, wCanvas.height);
+    const barW = wCanvas.width / BAR_COUNT;
+    for (let i = 0; i < BAR_COUNT; i++) {
+      waveHeights[i] += (waveTargets[i] - waveHeights[i]) * 0.15;
+      waveTargets[i] *= 0.92;
+      const h = waveHeights[i];
+      const x = i * barW;
+      const alpha = 0.15 + (h / 60) * 0.5;
+      wCtx.fillStyle = `rgba(26,26,46,${alpha})`;
+      wCtx.beginPath();
+      wCtx.roundRect(x + 1, wCanvas.height - h, barW - 2, h, 2);
+      wCtx.fill();
+    }
+  }
+
+  // ── Background color pulse ────────────────────────────────────────────────
+  let bgPulse = 0;
+
+  function flashBg(intensity) {
+    bgPulse = intensity;
+  }
+
+  function updateBg() {
+    if (bgPulse > 0) {
+      const warm = Math.round(bgPulse * 15);
+      document.body.style.backgroundColor = `rgb(${250}, ${247 - warm}, ${242 - warm * 2})`;
+      bgPulse *= 0.88;
+      if (bgPulse < 0.01) {
+        bgPulse = 0;
+        document.body.style.backgroundColor = CREAM;
+      }
+    }
+  }
+
+  // ── Wordmark vibrate ──────────────────────────────────────────────────────
+  let wordmarkEl = null;
+  let wShake = 0;
+
+  function shakeWordmark(intensity) {
+    wordmarkEl = wordmarkEl || document.querySelector('.wordmark-img-wrap svg');
+    if (!wordmarkEl) return;
+    wShake = intensity;
+  }
+
+  function updateWordmark() {
+    if (!wordmarkEl || wShake <= 0) return;
+    const dx = (Math.random() - 0.5) * wShake * 3;
+    const dy = (Math.random() - 0.5) * wShake * 1.5;
+    wordmarkEl.style.transform = `rotate(1deg) translate(${dx}px, ${dy}px)`;
+    wShake *= 0.75;
+    if (wShake < 0.05) {
+      wShake = 0;
+      wordmarkEl.style.transform = 'rotate(1deg)';
+    }
+  }
+
+  // ── Carousel speed sync ───────────────────────────────────────────────────
+  let carouselSpeed = 0.5; // base speed
+  let carouselBoost = 0;
+
+  function boostCarousel(amount) {
+    carouselBoost = amount;
+  }
+
+  // ── Beat handler ──────────────────────────────────────────────────────────
+  function onBeat(beatNum) {
+    const isDownbeat = beatNum % 4 === 0;
+    const isMidBeat  = beatNum % 2 === 0;
+    const intensity  = isDownbeat ? 1.0 : isMidBeat ? 0.6 : 0.3;
+
+    // Spawn particles
+    const count = isDownbeat ? 18 : isMidBeat ? 8 : 4;
+    for (let i = 0; i < count; i++) particles.push(new Particle(true));
+
+    // Wave bars
+
+    // Background flash on downbeat
+    if (isDownbeat) flashBg(intensity);
+
+    // Wordmark shake on downbeat
+    if (isDownbeat) shakeWordmark(intensity);
+
+    // Carousel speed burst
+    boostCarousel(intensity * 2);
+  }
+
+  // ── Main render loop ──────────────────────────────────────────────────────
+  function renderLoop(now) {
+    if (!engineRunning) return;
+    frameId = requestAnimationFrame(renderLoop);
+
+    // Ambient particles (off-beat)
+    if (Math.random() < 0.15) particles.push(new Particle(false));
+
+    // Update + draw particles
+    pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
+    for (let i = particles.length - 1; i >= 0; i--) {
+      particles[i].update();
+      particles[i].draw();
+      if (particles[i].life <= 0) particles.splice(i, 1);
+    }
+    updateBg();
+    updateWordmark();
+
+    // Carousel boost decay — expose for carousel to read
+    window._carouselBeatBoost = carouselBoost;
+    carouselBoost *= 0.92;
+  }
+
+  // ── Start / Stop ──────────────────────────────────────────────────────────
+  window.startBeatEngine = function() {
+    if (engineRunning) return;
+    engineRunning = true;
+    bar = 0;
+    resizeCanvases();
+    pCanvas.classList.add('active');
+    wCanvas.classList.add('active');
+
+    function scheduleBeat() {
+      onBeat(bar++);
+      beatTimer = setTimeout(scheduleBeat, BEAT_INTERVAL);
+    }
+    scheduleBeat();
+    requestAnimationFrame(renderLoop);
+  };
+
+  window.stopBeatEngine = function() {
+    engineRunning = false;
+    clearTimeout(beatTimer);
+    cancelAnimationFrame(frameId);
+    pCanvas.classList.remove('active');
+    wCanvas.classList.remove('active');
+    document.body.style.backgroundColor = CREAM;
+    if (wordmarkEl) wordmarkEl.style.transform = 'rotate(1deg)';
+    particles.length = 0;
+    window._carouselBeatBoost = 0;
+  };
+
+  window.addEventListener('resize', resizeCanvases);
+  resizeCanvases();
+})();
 </script>
 
 </body>
